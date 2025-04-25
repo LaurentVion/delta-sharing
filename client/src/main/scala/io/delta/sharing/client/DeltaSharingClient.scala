@@ -20,9 +20,7 @@ import java.io.{BufferedReader, InputStreamReader}
 import java.net.{URL, URLEncoder}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.UUID
-
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
-
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.input.BoundedInputStream
 import org.apache.hadoop.conf.Configuration
@@ -36,9 +34,9 @@ import org.apache.http.entity.StringEntity
 import org.apache.http.impl.client.{HttpClientBuilder, HttpClients}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
-
 import io.delta.sharing.client.auth.{AuthConfig, AuthCredentialProviderFactory}
 import io.delta.sharing.client.model._
+import io.delta.sharing.client.util.ConfUtils.ProxyConfig
 import io.delta.sharing.client.util.{ConfUtils, JsonUtils, RetryUtils, UnexpectedHttpStatus}
 import io.delta.sharing.spark.MissingEndStreamActionException
 
@@ -197,7 +195,8 @@ class DeltaSharingRestClient(
     asyncQueryMaxDuration: Long = 600000L,
     tokenExchangeMaxRetries: Int = 5,
     tokenExchangeMaxRetryDurationInSeconds: Int = 60,
-    tokenRenewalThresholdInSeconds: Int = 600
+    tokenRenewalThresholdInSeconds: Int = 600,
+    proxyConfigOpt: Option[ProxyConfig] = None
   ) extends DeltaSharingClient with Logging {
 
   logInfo(s"DeltaSharingRestClient with endStreamActionEnabled: $endStreamActionEnabled, " +
@@ -210,7 +209,9 @@ class DeltaSharingRestClient(
   // Convert the responseFormat to a Seq to be used later.
   private val responseFormatSet = responseFormat.split(",").toSet
 
-  private lazy val client = {
+  private lazy val client = createHttpClient()
+
+  def createHttpClient() = {
     val clientBuilder: HttpClientBuilder = if (sslTrustAll) {
       val sslBuilder = new SSLContextBuilder()
         .loadTrustMaterial(null, new TrustSelfSignedStrategy())
@@ -222,6 +223,12 @@ class DeltaSharingRestClient(
     } else {
       HttpClientBuilder.create()
     }
+
+    proxyConfigOpt.foreach { proxyConfig =>
+      val proxy = new HttpHost(proxyConfig.host, proxyConfig.port)
+      clientBuilder.setProxy(proxy)
+    }
+
     val config = RequestConfig.custom()
       .setConnectTimeout(timeoutInSeconds * 1000)
       .setConnectionRequestTimeout(timeoutInSeconds * 1000)
@@ -1361,6 +1368,7 @@ object DeltaSharingRestClient extends Logging {
       readerFeatures: String = ""
   ): DeltaSharingClient = {
     val sqlConf = SparkSession.active.sessionState.conf
+    val hadoopConf = SparkSession.active.sparkContext.hadoopConfiguration
 
     val profileProviderClass = ConfUtils.profileProviderClass(sqlConf)
     val profileProvider: DeltaSharingProfileProvider =
@@ -1387,6 +1395,7 @@ object DeltaSharingRestClient extends Logging {
     val tokenExchangeMaxRetryDurationInSeconds =
       ConfUtils.tokenExchangeMaxRetryDurationInSeconds(sqlConf)
     val tokenRenewalThresholdInSeconds = ConfUtils.tokenRenewalThresholdInSeconds(sqlConf)
+    val proxyConfigOpt = ConfUtils.getProxyConfig(hadoopConf)
 
     val clientClass = ConfUtils.clientClass(sqlConf)
     Class.forName(clientClass)
@@ -1408,7 +1417,8 @@ object DeltaSharingRestClient extends Logging {
         classOf[Long],
         classOf[Int],
         classOf[Int],
-        classOf[Int]
+        classOf[Int],
+        classOf[Option[ProxyConfig]]
     ).newInstance(profileProvider,
         java.lang.Integer.valueOf(timeoutInSeconds),
         java.lang.Integer.valueOf(numRetries),
@@ -1426,7 +1436,8 @@ object DeltaSharingRestClient extends Logging {
         java.lang.Long.valueOf(asyncQueryMaxDurationMillis),
         java.lang.Integer.valueOf(tokenExchangeMaxRetries),
         java.lang.Integer.valueOf(tokenExchangeMaxRetryDurationInSeconds),
-        java.lang.Integer.valueOf(tokenRenewalThresholdInSeconds)
+        java.lang.Integer.valueOf(tokenRenewalThresholdInSeconds),
+        proxyConfigOpt
       ).asInstanceOf[DeltaSharingClient]
   }
 }

@@ -16,11 +16,11 @@
 
 package io.delta.sharing.client
 
-import java.sql.Timestamp
+import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 
 import org.apache.http.HttpHeaders
 import org.apache.http.client.methods.{HttpGet, HttpRequestBase}
-
+import org.apache.http.util.EntityUtils
 import io.delta.sharing.client.model.{
   AddCDCFile,
   AddFile,
@@ -32,7 +32,11 @@ import io.delta.sharing.client.model.{
   RemoveFile,
   Table
 }
-import io.delta.sharing.client.util.UnexpectedHttpStatus
+import io.delta.sharing.client.util.ConfUtils.ProxyConfig
+import io.delta.sharing.client.util.{ProxyServer, UnexpectedHttpStatus}
+import org.sparkproject.jetty.server.Server
+import org.sparkproject.jetty.servlet.{ServletHandler, ServletHolder}
+
 
 // scalastyle:off maxLineLength
 class DeltaSharingRestClientSuite extends DeltaSharingIntegrationTest {
@@ -65,6 +69,58 @@ class DeltaSharingRestClientSuite extends DeltaSharingIntegrationTest {
       DeltaSharingRestClient.parsePath("foo#a.b.c.")
     }
   }
+
+  test("traffic goes through a proxy when a proxy configured") {
+    // Create a local HTTP server.
+    val server = new Server(0)
+    val handler = new ServletHandler()
+    server.setHandler(handler)
+    handler.addServletWithMapping(new ServletHolder(new HttpServlet {
+      override def doGet(req: HttpServletRequest, resp: HttpServletResponse): Unit = {
+        resp.setContentType("text/plain")
+        resp.setStatus(HttpServletResponse.SC_OK)
+
+        // scalastyle:off println
+        resp.getWriter.println("Hello, World!")
+        // scalastyle:on println
+      }
+    }), "/*")
+    server.start()
+    do {
+      Thread.sleep(100)
+    } while (!server.isStarted())
+
+    // Create a local HTTP proxy server.
+    val proxyServer = new ProxyServer(0)
+    proxyServer.initialize()
+
+    try {
+
+      // Configure the httpClient to use the ProxyConfig.
+      val client = new DeltaSharingRestClient(
+        null,
+        proxyConfigOpt = Some(ProxyConfig(proxyServer.getHost(), proxyServer.getPort()))
+      )
+
+      // Get http client instance.
+      val httpClient = client.createHttpClient()
+
+      // Send a request to the local server through the httpClient.
+      val response = httpClient.execute(new HttpGet(server.getURI.toString))
+
+      // Assert that the request is successful.
+      assert(response.getStatusLine.getStatusCode == HttpServletResponse.SC_OK)
+      val content = EntityUtils.toString(response.getEntity)
+      assert(content.trim == "Hello, World!")
+
+      // Assert that the request is passed through proxy.
+      assert(proxyServer.getCapturedRequests().size == 1)
+    } finally {
+      server.stop()
+      proxyServer.stop()
+    }
+  }
+
 
   integrationTest("Check headers") {
     val httpRequest = new HttpGet("random_url")
